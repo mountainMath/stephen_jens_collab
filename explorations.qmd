@@ -1,0 +1,156 @@
+---
+title: "Explorations"
+format: html
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cancensus)
+library(PostGisConnections)
+library(rental)
+library(sf)
+```
+
+```{r}
+cov_geo <- get_census("2020",regions = list(CSD="5915022"),geo_format = 'sf')
+
+rental_connection <- connection_for_prefix("cl") %>% tbl("cl")
+```
+```{r}
+
+vancouver_data <-rental_connection |>
+  filter_intersect_geometry(cov_geo,"location") |>
+  filter(scrapeDate>="2018-01-01") |>
+  select(scrapeDate,attributes,CraigID,repostOfCraigID,ask,beds,size,title,address,lastSeenDate,location) |>
+  collect_geodata(geometry_column="location") |>
+  mutate(attributes_list=attributes %>% map(jsonlite::fromJSON)) |>
+  mutate(furnished=grepl("furnished",attributes))
+```
+
+
+```{r}
+vancouver_data |>
+  st_drop_geometry() |>
+  filter(is.na(repostOfCraigID)) |>
+  mutate(Date=as.Date(paste0(substr(scrapeDate,1,8),"01"))) |>
+  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(!is.na(beds)) |>
+  mutate(Beds=case_when(beds==0 ~ "Studio",
+                        beds==1 ~ "1 bedroom",
+                        beds==2 ~ "2 bedrooms",
+                        TRUE ~ "3+ bedrooms")) |>
+  mutate(Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms"))) |>
+  summarize(n=n(),.by=c(Date,furnished,Beds)) |>
+  ggplot(aes(x=Date,y=n,fill=furnished)) +
+  geom_col() +
+  facet_wrap(~Beds,scales="free_y") +
+  scale_y_continuous(labels=scales::comma) 
+```
+
+
+```{r}
+vancouver_data |>
+  st_drop_geometry() |>
+  filter(!furnished) |>
+  filter(is.na(repostOfCraigID)) |>
+  mutate(Date=as.Date(paste0(substr(scrapeDate,1,8),"01"))) |>
+  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(!is.na(beds)) |>
+  mutate(Beds=case_when(beds==0 ~ "Studio",
+                        beds==1 ~ "1 bedroom",
+                        beds==2 ~ "2 bedrooms",
+                        TRUE ~ "3+ bedrooms")) |>
+  mutate(Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms"))) |>
+  ggplot(aes(x=Date,y=ask,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") +
+  scale_y_continuous(labels=scales::dollar) 
+
+```
+
+
+```{r}
+vancouver_data |>
+  filter(!furnished) |>
+  st_drop_geometry() |>
+  filter(is.na(repostOfCraigID)) |>
+  mutate(Date=as.Date(paste0(substr(scrapeDate,1,8),"01"))) |>
+  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(!is.na(beds),!is.na(size)) |>
+  mutate(Beds=case_when(beds==0 ~ "Studio",
+                        beds==1 ~ "1 bedroom",
+                        beds==2 ~ "2 bedrooms",
+                        TRUE ~ "3+ bedrooms")) |>
+  mutate(Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms"))) |>
+  ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") +
+  scale_y_continuous(labels=scales::dollar) 
+```
+
+
+
+```{r}
+vancouver_data |>
+  filter(!furnished) |>
+  st_drop_geometry() |>
+  filter(is.na(repostOfCraigID)) |>
+  mutate(Year=substr(scrapeDate,1,4)) |>
+  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(!is.na(size),size>200,size<4000) |>
+  ggplot(aes(x=size,y=ask/size)) +
+  geom_point() +
+  facet_wrap(~Year,scales="free_y") +
+  scale_y_continuous(labels=scales::dollar) +
+  scale_x_continuous(trans="log") +
+  geom_smooth(method="lm",se=FALSE)
+```
+
+
+
+```{r}
+vh <- read_sf('{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {},
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -123.1309461593628,
+          49.27458088512723
+        ]
+      }
+    }
+  ]
+}')
+
+vancouver_house <- vancouver_data %>% 
+  filter(grepl("vancouver house",title,ignore.case = TRUE)#|grepl("vancouver house",description,ignore.case = TRUE)
+         ) %>%
+  #filter(!st_is_empty(.)) %>%
+  mutate(distance=st_distance(.,vh )) %>%
+  filter(distance %>% as.numeric < 500)
+
+ls <- vancouver_house %>% 
+  group_by(CraigID) %>% 
+  arrange(scrapeDate) %>% 
+  summarize(p1=first(ask),p2=last(ask),b=last(beds),size=last(size),title=last(title),
+            address=last(address),lastDate=last(scrapeDate),
+            firstDate=first(scrapeDate),r=last(repostOfCraigID),ld=last(lastSeenDate),furnished=last(furnished)) %>%
+  mutate(orca=grepl("orca",title,ignore.case = TRUE))
+
+ggplot(ls,aes(x=as.Date(firstDate),xend=as.Date(lastDate),y=p1,yend=p2,color=as.character(b),shape=furnished)) +
+  geom_segment(alpha=0.5) +
+  geom_segment(aes(x=as.Date(lastDate),xend=as.Date(ld),y=p2,yend=p2),alpha=0.5) +
+  geom_point(alpha=0.2) +
+  geom_point(aes(x=as.Date(lastDate),y=p2),alpha=0.2) +
+  geom_point(aes(x=as.Date(ld),y=p2),alpha=0.2) +
+  scale_y_continuous(labels=scales::dollar) +
+  labs(title="Vancouver House listings",color="Bedrooms",y="Asking price",x=NULL) +
+  coord_cartesian(ylim=c(0,20000))
+```
+
+
