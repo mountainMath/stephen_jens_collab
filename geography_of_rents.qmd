@@ -1,0 +1,73 @@
+---
+title: "Geography of rent"
+format: html
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(cancensus)
+library(PostGisConnections)
+library(rental)
+library(sf)
+library(mountainmathHelpers)
+```
+
+```{r}
+cov_geo <- get_census("2020",regions = list(CSD="5915022"),geo_format = 'sf')
+
+rental_connection <- connection_for_prefix("cl") %>% tbl("cl")
+```
+
+```{r}
+
+vancouver_data <-rental_connection |>
+  filter_intersect_geometry(cov_geo,"location") |>
+  filter(scrapeDate>="2018-01-01") |>
+  select(scrapeDate,attributes,CraigID,repostOfCraigID,ask,beds,size,title,address,lastSeenDate,location) |>
+  collect_geodata(geometry_column="location") |>
+  mutate(attributes_list=attributes %>% map(jsonlite::fromJSON)) |>
+  mutate(furnished=grepl("furnished",attributes))
+```
+
+```{r}
+
+cov_geo_lambert <- cov_geo %>% st_transform(lambert_conformal_conic_at(.))
+hex_grid <- st_make_grid(cov_geo_lambert,cellsize = 500,square = FALSE) |>
+  st_as_sf() |>
+  st_filter(cov_geo_lambert) |>
+  mutate(hex_id=paste0("HEX_",row_number())) 
+```
+
+```{r}
+ggplot(hex_grid) +
+  geom_sf()
+```
+
+```{r}
+
+hex_rents <- vancouver_data |>
+  filter(is.na(repostOfCraigID)) |>
+  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(!is.na(size),size>200,size<4000) |>
+  filter(!is.na(beds)) |>
+  mutate(Year=substr(scrapeDate,1,4)) |>
+  st_transform(st_crs(hex_grid)) |>
+  st_join(hex_grid) |>
+  st_drop_geometry() |>
+  summarize(rent_sf=mean(ask/size),count=n(),.by=c(hex_id,Year)) |>
+  filter(Year %in% seq(2020,2024)) |>
+  complete(hex_id,Year,fill=list(rent_sf=NA,count=0))
+ 
+
+hex_grid |>
+  left_join(hex_rents,by="hex_id") |>
+  filter(count>0) |>
+  mutate(rent_sf=ifelse(count<5,NA,rent_sf)) |>
+  ggplot(aes(fill=rent_sf)) +
+  geom_sf() +
+  scale_fill_viridis_c() +
+  facet_wrap(~Year) +
+  coord_sf(datum=NA)
+```
+
