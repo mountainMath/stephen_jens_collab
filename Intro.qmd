@@ -1,0 +1,97 @@
+---
+title: "Listing Data"
+output: html_document
+date: "2025-02-10"
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(cancensus)
+#remotes::install_github("mountainmath/PostGisConnections")
+library(PostGisConnections)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(tm)
+```
+
+```{r}
+geo <- get_census("CA21",regions = list(CSD="5915022"),geo_format = 'sf')
+
+data <- connection_for_prefix("cl") %>% tbl("cl")
+#data_old <- connection_for_prefix("rental") %>% tbl("vancraig")
+```
+
+```{r}
+
+d<-data %>%
+  filter(is.na(repostOfCraigID) & !is.na(size)) %>%
+  select(scrapeDate,postDate,attributes,CraigID,repostOfCraigID,ask,beds,size,title,address
+         ,lastSeenDate,location) %>%
+  filter_intersect_geometry(geo,"location") |> # only doing CoV rn just to keep the data manageable
+  collect_geodata(geometry_column="location") |>
+  mutate(attributes_list=attributes %>% map(jsonlite::fromJSON))  %>%
+  mutate(day=as.Date(scrapeDate), furnished=grepl("furnished",attributes)) #%>%
+
+# can add back in reposted data eventually, for now just filtering out. I'll check with Jens for that or just dig into the exact meaning of the repost variable. Like does that track with the original variable? I think so, but again, that's a fun problem for another day.
+```
+
+## Basic Filtering & Trying to Replace Missing info from Title
+
+```{r}
+d <- d %>% filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) %>%
+  filter(!is.na(beds),!is.na(size)) |> 
+  mutate(Beds=case_when(beds==0 ~ "Studio",
+                        beds==1 ~ "1 bedroom",
+                        beds==2 ~ "2 bedrooms",
+                        TRUE ~ "3+ bedrooms"),
+         Unit_type=case_when(grepl("apartment",attributes) ~ "Apartment",
+                             grepl("condo",attributes) ~ "Condo",
+                             grepl("townhouse",attributes) ~ "Townhouse",
+                             grepl("house",attributes) ~ "House",
+                             grepl("duplex",attributes) ~ "Duplex",
+                             grepl("flat",attributes) ~ "Flat",
+                             grepl("loft",attributes) ~ "Loft",
+                             TRUE ~ "I missed a category"))
+
+summary(as.factor(d$Unit_type))
+```
+
+### Which words and spellings do people use to identify unit types?
+
+```{r}
+missing_unit <- filter(d,Unit_type=="I missed a category")
+## looks like there are quite a few duplicate posts here that weren't labelled as duplicates. Maybe I can do some text analysis eventually to try and eliminate those
+
+docs <- Corpus(VectorSource(missing_unit$title))
+#docs <- tm_map(docs, content_transformer(tolower))
+#docs <- tm_map(docs, removeNumbers)
+#docs <- tm_map(docs, removePunctuation)
+#docs <- tm_map(docs, stripWhitespace)
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m),decreasing=TRUE)
+top_title_words <- data.frame(word = names(v),freq=v)
+top_title_words
+#wordcloud(top_words$word,top_words$freq, col=brewer.pal(length(top_words$freq), "Dark2"), random.order=FALSE, rot.per=0.1,max.words = 200,scale=c(5.7,.8))
+
+
+condo <- c("condo","Condo") # penthouse in here or in apt?
+apt <- c("apt","apartment","Apartment","apartments")
+sfh <- c("house","basement") # just including basements into "house" for now but it would be interesting to separate them out later on.
+th <- c("townhouse","TOWNHOUSE","Townhouse","TownHouse")
+missing_unit <- missing_unit %>% 
+  mutate(Unit_type = case_when(grepl(paste(condo,collapse="|"),title) ~ "Condo",
+                                     grepl(paste(apt,collapse="|"),title) ~ "Apartment",
+                                     grepl(paste(sfh,collapse="|"),title) ~ "House",
+                                     grepl(paste(th,collapse="|"),title) ~ "Townhouse",
+                                     TRUE ~ "I missed a category"))
+                                     #grepl("basement",title) ~ "Basement"))
+summary(as.factor(missing_unit$Unit_type))
+
+
+
+
+```
