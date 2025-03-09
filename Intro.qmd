@@ -15,11 +15,11 @@ library(lubridate)
 library(dplyr)
 library(sf)
 library(tm)
+library(ggridges)
 ```
 
 ```{r}
 geo <- get_census("CA21",regions = list(CSD="5915022"),geo_format = 'sf')
-
 data <- connection_for_prefix("cl") %>% tbl("cl")
 #data_old <- connection_for_prefix("rental") %>% tbl("vancraig")
 ```
@@ -42,7 +42,7 @@ d<-data %>%
 
 ```{r}
 d <- d %>% filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) %>%
-  filter(!is.na(beds),!is.na(size)) |> 
+  filter(!is.na(beds),!is.na(size),size>200,size<5000) |> 
   mutate(Beds=case_when(beds==0 ~ "Studio",
                         beds==1 ~ "1 bedroom",
                         beds==2 ~ "2 bedrooms",
@@ -54,7 +54,11 @@ d <- d %>% filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) %>%
                              grepl("duplex",attributes) ~ "Duplex",
                              grepl("flat",attributes) ~ "Flat",
                              grepl("loft",attributes) ~ "Loft",
-                             TRUE ~ "I missed a category"))
+                             TRUE ~ "I missed a category"),
+         Date=as.Date(paste0(substr(scrapeDate,1,8),"01")),
+         Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms")),
+         Year=substr(scrapeDate,1,4),
+         rent_per_sqft=ask/size) 
 
 summary(as.factor(d$Unit_type))
 ```
@@ -78,20 +82,154 @@ top_title_words
 #wordcloud(top_words$word,top_words$freq, col=brewer.pal(length(top_words$freq), "Dark2"), random.order=FALSE, rot.per=0.1,max.words = 200,scale=c(5.7,.8))
 
 
-condo <- c("condo","Condo") # penthouse in here or in apt?
-apt <- c("apt","apartment","Apartment","apartments")
-sfh <- c("house","basement") # just including basements into "house" for now but it would be interesting to separate them out later on.
-th <- c("townhouse","TOWNHOUSE","Townhouse","TownHouse")
+#condo <- c("condo","Condo") # should I include penthouse/sub-penthouse included here on in apt?
+apt <- c("apt","apartment","apartments","studio") # just including studios in apartments for now (could be condos too i guess)
+sfh <- c("\\bhouse\\b","basement","\\bsuite\\b","\\bSuite\\b") # just including basements/suites into "house" for now but it would be interesting to separate them out later on
+#th <- c("townhouse","TOWNHOUSE","Townhouse","TownHouse")
 missing_unit <- missing_unit %>% 
-  mutate(Unit_type = case_when(grepl(paste(condo,collapse="|"),title) ~ "Condo",
-                                     grepl(paste(apt,collapse="|"),title) ~ "Apartment",
-                                     grepl(paste(sfh,collapse="|"),title) ~ "House",
-                                     grepl(paste(th,collapse="|"),title) ~ "Townhouse",
+  mutate(Unit_type = case_when(grepl("condo",title,ignore.case = TRUE) ~ "Condo",
+                                     grepl(paste(apt,collapse="|"),title,ignore.case = TRUE) ~ "Apartment",
+                                     grepl(paste(sfh,collapse="|"),title,ignore.case = TRUE) ~ "House",
+                                     grepl("townhouse",title,ignore.case = TRUE) ~ "Townhouse",
                                      TRUE ~ "I missed a category"))
                                      #grepl("basement",title) ~ "Basement"))
 summary(as.factor(missing_unit$Unit_type))
 
+#docs <- Corpus(VectorSource(missing_unit$title))
+#dtm <- TermDocumentMatrix(docs)
+#m <- as.matrix(dtm)
+#v <- sort(rowSums(m),decreasing=TRUE)
+#top_title_words <- data.frame(word = names(v),freq=v)
+#top_title_words
 
+missing_unit <- filter(missing_unit,Unit_type!="I missed a category")
+d <- filter(d,Unit_type!="I missed a category")
 
+# adding the listings with replaced unit_types back into the main dataset:
+d <- rbind(d,missing_unit)
 
+rm(docs,dtm,m,top_title_words,missing_unit,apt,condo,sfh,th,v)
 ```
+
+## On to some Graphs
+
+### Number of Listings over time by Furnished status
+
+```{r}
+d |>
+  st_drop_geometry() |>
+  summarize(n=n(),.by=c(Date,furnished,Beds)) |>
+  ggplot(aes(x=Date,y=n,fill=furnished)) +
+  geom_col() +
+  facet_wrap(~Beds,scales="free_y") +
+  scale_y_continuous(labels=scales::comma) 
+```
+### Listing Prices by Bedroom Count over time
+```{r}
+d |>
+  st_drop_geometry() |>
+  filter(!furnished,Unit_type=="Apartment") |>
+  ggplot(aes(x=Date,y=ask,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") +
+  scale_y_continuous(labels=scales::dollar) 
+```
+### Unit Sizes over time (they look pretty stable, no matter how you slice it - unit_type/bedroom_count/etc.)
+#### next step - matching the listings with building data so that we can group listings (and unit size) by building age.
+```{r}
+d |> filter(!furnished) |>
+  ggplot(aes(x=Date,y=size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") + 
+  scale_y_continuous(labels=scales::comma) 
+```
+
+### Listing Prices per Sqft over time
+```{r}
+d |> filter(!furnished) |>
+  ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") + 
+  scale_y_continuous(labels=scales::dollar) 
+
+#summary(as.factor(d$Unit_type))
+d |> filter(!furnished,!Unit_type %in% c("Flat","Studio")) |>
+  ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Unit_type,scales="free_y") + 
+  scale_y_continuous(labels=scales::dollar) 
+
+d |> filter(!furnished,Unit_type %in% c("Apartment"),Year!="2024") |> # 2024 only has limited data, so just excluding it for this graph
+  ggplot(aes(x=Year,y=ask/size,group=as.factor(Year))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds,scales="free_y") + 
+  scale_y_continuous(labels=scales::dollar) 
+
+# ## box plot alternative:
+# d |> filter(!furnished,Unit_type %in% c("Apartment"),Year!="2024",rent_per_sqft<8) |> 
+#   ggplot(aes(x=rent_per_sqft,y=Year,fill=factor(stat(quantile)))) +
+#   stat_density_ridges(
+#     geom = "density_ridges_gradient", calc_ecdf = TRUE,
+#     quantiles = 4, quantile_lines = TRUE) +
+#   scale_fill_viridis_d(name = "Quartiles") +facet_wrap(~Beds)
+```
+
+### Rent/Sqft vs. Sqft
+```{r}
+d |>
+  filter(!furnished,Unit_type=="Apartment") |>
+  st_drop_geometry() |>
+  filter(!is.na(size),size>200,size<4000) |>
+  ggplot(aes(x=size,y=ask/size)) +
+  geom_point() +
+  facet_wrap(~Year) +
+  scale_y_continuous(labels=scales::dollar) +
+  scale_x_continuous(trans="log") +
+  geom_smooth(method="lm",se=FALSE)
+```
+
+### Looking at price changes after a posting is live (this might be particularly helpful to identify market trends)
+```{r}
+vh <- read_sf('{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {},
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -123.1309461593628,
+          49.27458088512723
+        ]
+      }
+    }
+  ]
+}')
+
+vancouver_house <- d %>% 
+  filter(grepl("vancouver house",title,ignore.case = TRUE)#|grepl("vancouver house",description,ignore.case = TRUE)
+         ) %>%
+  #filter(!st_is_empty(.)) %>%
+  mutate(distance=st_distance(.,vh )) %>%
+  filter(distance %>% as.numeric < 500)
+
+ls <- vancouver_house %>% 
+  group_by(CraigID) %>% 
+  arrange(scrapeDate) %>% 
+  summarize(p1=first(ask),p2=last(ask),b=last(beds),size=last(size),title=last(title),
+            address=last(address),lastDate=last(scrapeDate),
+            firstDate=first(scrapeDate),r=last(repostOfCraigID),ld=last(lastSeenDate),furnished=last(furnished)) %>%
+  mutate(orca=grepl("orca",title,ignore.case = TRUE))
+
+ggplot(ls,aes(x=as.Date(firstDate),xend=as.Date(lastDate),y=p1,yend=p2,color=as.character(b),shape=furnished)) +
+  geom_segment(alpha=0.5) +
+  geom_segment(aes(x=as.Date(lastDate),xend=as.Date(ld),y=p2,yend=p2),alpha=0.5) +
+  geom_point(alpha=0.2) +
+  geom_point(aes(x=as.Date(lastDate),y=p2),alpha=0.2) +
+  geom_point(aes(x=as.Date(ld),y=p2),alpha=0.2) +
+  scale_y_continuous(labels=scales::dollar) +
+  labs(title="Vancouver House listings",color="Bedrooms",y="Asking price",x=NULL) +
+  coord_cartesian(ylim=c(0,20000))
+```
+
