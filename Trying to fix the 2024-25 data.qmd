@@ -1,0 +1,78 @@
+---
+title: "Trying to fix the 2024/25 data"
+format: html
+editor: visual
+---
+
+## 
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE,warnings=FALSE)
+library(tidyverse)
+library(sf)
+library(cancensus)
+#remotes::install_github("mountainmath/PostGisConnections")
+library(PostGisConnections)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(tm)
+```
+
+```{r}
+geo <- get_census("CA21",regions = list(CSD="5915022"),geo_format = 'sf')
+data <- connection_for_prefix("cl") %>% tbl("cl")
+```
+
+```{r}
+new_d <-data %>%
+  filter(scrapeDate>"2024-02-10") %>%
+  select(scrapeDate,postDate,attributes,CraigID,repostOfCraigID,ask,beds,size,title,description,address
+         ,lastSeenDate,location) %>%
+  filter_intersect_geometry(geo,"location") |> # only doing CoV rn just to keep the data manageable
+  collect_geodata(geometry_column="location") |>
+  mutate(attributes_list=attributes %>% map(jsonlite::fromJSON))  %>%
+  mutate(furnished=grepl("furnished",attributes))
+```
+
+```{r}
+new_d <- new_d |> filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  mutate(Beds=case_when(beds==0 ~ "Studio",
+                        beds==1 ~ "1 bedroom",
+                        beds==2 ~ "2 bedrooms",
+                        TRUE ~ "3+ bedrooms"),
+         Unit_type=case_when(grepl("apartment",attributes) ~ "Apartment",
+                             grepl("condo",attributes) ~ "Condo",
+                             grepl("townhouse",attributes) ~ "Townhouse",
+                             grepl("house",attributes) ~ "House",
+                             grepl("duplex",attributes) ~ "Duplex",
+                             grepl("flat",attributes) ~ "Flat",
+                             grepl("loft",attributes) ~ "Loft",
+                             TRUE ~ "I missed a category"),
+         Date=as.Date(paste0(substr(scrapeDate,1,8),"01")),
+         Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms")),
+         Year=substr(scrapeDate,1,4),
+         rent_per_sqft=ask/size) 
+```
+
+```{r}
+apt <- c("apt","apartment","apartments","studio") # just including studios in apartments for now (could be condos too i guess)
+sfh <- c("\\bhouse\\b","basement","\\bsuite\\b","\\bSuite\\b","laneway") # just including basements/suites/laneways into "house" for now but it would be interesting to separate them out later on
+#th <- c("townhouse","TOWNHOUSE","Townhouse","TownHouse")
+missing_unit <- new_d %>% 
+  mutate(Unit_type = case_when(grepl("condo",title,ignore.case = TRUE) ~ "Condo",
+                                     grepl(paste(apt,collapse="|"),title,ignore.case = TRUE) ~ "Apartment",
+                                     grepl(paste(sfh,collapse="|"),title,ignore.case = TRUE) ~ "House",
+                                     grepl("townhouse",title,ignore.case = TRUE) ~ "Townhouse",
+                                     TRUE ~ "I missed a category"),  #grepl("basement",title) ~ "Basement")
+         furnished = grepl("furnished",description,ignore.case = TRUE),
+         size = as.numeric(str_extract(description, "\\d+(?=\\s*sqft)")))
+
+summary(as.factor(missing_unit$Unit_type))
+summary(missing_unit$size)
+#missing_unit <- filter(missing_unit,Unit_type!="I missed a category")
+rm(apt,sfh,missing_unit)
+```
+
+### So, about half of the CoV rows from 2024-25 have unit types that we can grab from the descriptions, but only about 30k (~15%) have sqft info from there. Still bettter than nothing, but it would be great to supplement this data fixing with some QA from another dataset, as outlined below ->
+## Next step: Can we match up other properties with missing unit-type/size by using the CoV's property-tax-data or BC Assessment data to geocode it to a specific building/unit?
