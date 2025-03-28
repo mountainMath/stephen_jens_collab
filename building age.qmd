@@ -1,0 +1,224 @@
+---
+title: "Building Age"
+format: html
+editor: visual
+---
+
+## Quarto
+
+```{r}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(sf)
+library(cancensus)
+library(PostGisConnections)
+library(lubridate)
+library(dplyr)
+library(sf)
+library(tm)
+```
+
+```{r}
+prop_data <- read.csv("cov-property-tax-report.csv",sep = ";") # I can grab the 2019 data later
+
+prop_data <- prop_data |> select(-c(NARRATIVE_LEGAL_LINE1,NARRATIVE_LEGAL_LINE2,NARRATIVE_LEGAL_LINE3,NARRATIVE_LEGAL_LINE4,NARRATIVE_LEGAL_LINE5))
+
+
+addresses <- read.csv("property-addresses.csv",sep = ";")
+names(addresses)[5] <- "LAND_COORDINATE"
+addresses <- addresses %>%
+  distinct(LAND_COORDINATE, .keep_all = TRUE)
+```
+
+```{r}
+#prop2 <- left_join(prop_data,addresses,by="LAND_COORDINATE")
+# of rows shouldn't be increasing.. just going to filter out the missing site ID rows and then see if that helps
+
+#addresses %>% count(LAND_COORDINATE) %>% filter(n > 1)
+# not sure what to do since it seems like a lot of the duplicates are just parcels that have multiple locations (with *slightly* different coordinates. Maybe I'll just keep the first rows for each land_coordinate for now (since no dates attached) I can try using one of the other "property/address" matching datasets later on (like the parcel polygons) or see what Jens did when he created his property tax map.
+
+prop_data <- left_join(prop_data,addresses,by="LAND_COORDINATE")
+rm(addresses)
+```
+
+Joining with (some of the) Craigslist Data (or at least attempting to)
+
+```{r}
+# starting off with the dataset from line 112 in the "Intro" file
+names(prop_data)[24] <- "Year"
+
+
+## leaving off here for now, lots of notes in deepseek too! fun fun fun!!!
+library(jsonlite)
+library(purrr)
+
+prop_data <- filter(prop_data, !is.na(Geom))
+prop_data_sf <- prop_data %>% mutate(
+    # Parse JSON to list
+    geom_list = map(Geom, ~ fromJSON(.x)),
+    # Extract coordinates and ensure numeric type
+    coords = map(geom_list, ~ {
+      # Convert to numeric and handle potential issues
+      coords <- as.numeric(.x$coordinates)
+      if(any(is.na(coords))) stop("Non-numeric coordinates found")
+      coords
+    }),
+    
+    # Create points
+    geometry = map(coords, ~ st_point(.x))
+  ) %>%
+  st_as_sf() %>%
+  select(-geom_list, -coords) %>%
+  st_set_crs(4326) 
+
+#prop_data_sf <- st_transform(prop_data_sf,st_crs(d))
+
+
+#prop_2020 <- filter(prop_data_sf,Year==2020)
+#d_2020 <- filter(d,Year==2020)
+
+
+matched_data <- st_join(
+  prop_data_sf,  # Your first dataset (reference points)
+  d_2020,     # Your second dataset (points to match)
+  join = st_is_within_distance,  # Spatial predicate
+  dist = 10,    # Distance threshold in CRS units (meters for projected)
+  left = FALSE   # Set to TRUE to keep non-matching reference points
+)
+
+
+match_summary <- matched_data %>%
+  st_drop_geometry() %>%  # Remove geometry for faster calculations
+  summarize(
+    total_matches = n(),
+    unique_reference_points = n_distinct(LAND_COORDINATE),
+    unique_target_points = n_distinct(CraigID),
+   # avg_distance = mean(distance, na.rm = TRUE),
+   # max_distance = max(distance, na.rm = TRUE)
+  )
+
+d_2020 %>% summarize(total_rows=n(),unique_postings=n_distinct(CraigID))
+prop_2020 %>% summarize(total_rows=n(),unique_postings=n_distinct(LAND_COORDINATE))
+
+library(mapview)
+# Plotting random matches
+
+sample_size <- min(100, nrow(matched_data))
+matched_sample <- matched_data %>% slice_sample(n = sample_size)
+target_sample <- d_2020 %>% filter(CraigID %in% matched_sample$CraigID)
+
+# Create map
+mapview(matched_sample, col.regions = "blue", layer.name = "Reference") + 
+mapview(target_sample, col.regions = "red", layer.name = "Target Matches")
+
+```
+
+Trying a fancier join (that also utilizes the Year)
+
+```{r}
+matched_data <- st_join(
+  prop_data_sf,
+  d,
+  join = function(x, y) {
+    # First filter by year match
+    year_matches <- x$Year %in% y$Year  
+    # Then find spatial matches within distance
+    spatial_matches <- st_is_within_distance(x, y, dist = 10)
+    # Combine conditions
+    lapply(seq_along(spatial_matches), function(i) {
+      if(year_matches[i]) {
+        spatial_matches[[i]][y$Year[spatial_matches[[i]]] == x$Year[i]]
+      } else {
+        integer(0)
+      }
+    })
+  },
+  left = FALSE
+)  # 408k rows when only doing 2020, 1.55M for this one
+
+# Count matches per year
+matched_data %>% 
+  st_drop_geometry() %>%
+  count(Year.x, Year.y)
+
+# View sample matches
+matched_data %>%
+  select(contains("Year"), geometry) %>%
+  slice_sample(n = 5)
+
+
+sample_size <- min(1000, nrow(matched_data))
+matched_sample <- matched_data %>% slice_sample(n = sample_size)
+target_sample <- d %>% filter(CraigID %in% matched_sample$CraigID)
+
+# Create map
+mapview(matched_sample, col.regions = "blue", layer.name = "Reference") + 
+mapview(target_sample, col.regions = "red", layer.name = "Target Matches")
+```
+
+## On to some (building age) Graphs
+
+```{r}
+matched_data <- matched_data %>% mutate(building_age = ifelse(YEAR_BUILT>=2015,"0-10 years",
+                                                              ifelse(YEAR_BUILT>=2005,"10-20 years",
+                                                                     ifelse(YEAR_BUILT>=1995,"20-30 years",
+                                                                            ifelse(YEAR_BUILT>=1985,"30-40 years",
+                                                                                   ifelse(YEAR_BUILT>=1975,"40-50 years",
+                                                                                          ifelse(YEAR_BUILT>=1965,"50-60 years",
+                                                                                                 ifelse(YEAR_BUILT>=1955,"60-70 years",
+                                                                                                        ifelse(YEAR_BUILT>=1945,"70-80 years",
+                                                                                                               "80+ years old")))))))))
+
+```
+
+### Unit Sizes over time (*I'll filter out the "duplicates" from the graph later on [i.e. - properties/listings with multiple rows for whatever reason])
+
+```{r}
+matched_data |> filter(!furnished,Unit_type=="Apartment") |>
+  ggplot(aes(x=building_age,y=size,group=as.factor(building_age),color=building_age)) +
+  geom_boxplot(outliers=FALSE)+
+  facet_wrap(~Beds) + 
+  scale_y_continuous(labels=scales::comma) 
+```
+
+### Listing Prices per Sqft over time
+
+```{r}
+matched_data |> filter(!furnished,building_age %in% c("0-10 years","10-20 years")) |>
+  ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds) + 
+  scale_y_continuous(labels=scales::dollar) 
+
+matched_data |> filter(!furnished,building_age %in% c("0-10 years","10-20 years")) |>
+  ggplot(aes(x=Date,y=ask/size)) +
+  geom_smooth()+
+  facet_wrap(~Beds) + 
+  scale_y_continuous(labels=scales::dollar) 
+#count_check <- filter(matched_data,!furnished,building_age %in% c("0-10 years","10-20 years"))
+
+## Apts only:
+matched_data |> filter(!furnished,building_age %in% c("0-10 years","10-20 years"),Unit_type =="Apartment") |>
+  ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+  geom_boxplot(outliers=FALSE) +
+  facet_wrap(~Beds) + 
+  scale_y_continuous(labels=scales::dollar) 
+
+matched_data |> filter(!furnished,building_age %in% c("0-10 years","10-20 years"),Unit_type =="Apartment") |>
+  ggplot(aes(x=Date,y=ask/size)) +
+  geom_smooth()+
+  facet_wrap(~Beds) + 
+  scale_y_continuous(labels=scales::dollar) 
+## look at that juicy rent/sqft gap between 1br/studios and 2br/3br units! It would be helpful to plot that as well somehow (maybe the difference in the median rent/sqft each day? for 1br&studios together vs. 2br's to price that very specific part of the additional privacy (no roommate)
+
+### also going to refine the spatial join over time and do more validation there, but intriguing results for now!
+
+## all unit types:
+# matched_data |> filter(!furnished,!Unit_type %in% c("Flat","Loft"),building_age %in% c("0-10 years","10-20 years")) |>
+#   ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
+#   geom_boxplot(outliers=FALSE) +
+#   facet_wrap(~Unit_type,scales="free_y") + 
+#   scale_y_continuous(labels=scales::dollar) 
+```
+
+
