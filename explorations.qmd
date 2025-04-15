@@ -13,7 +13,7 @@ library(sf)
 ```
 
 ```{r}
-cov_geo <- get_census("2020",regions = list(CSD="5915022"),geo_format = 'sf')
+cov_geo <- get_census("2021",regions = list(CSD="5915022"),geo_format = 'sf')
 
 rental_connection <- connection_for_prefix("cl") %>% tbl("cl")
 ```
@@ -70,13 +70,13 @@ vancouver_data |>
 ```
 
 
-```{r}
+```{r warning=FALSE}
 vancouver_data |>
-  filter(!furnished) |>
+  #filter(!furnished) |>
   st_drop_geometry() |>
   filter(is.na(repostOfCraigID)) |>
   mutate(Date=as.Date(paste0(substr(scrapeDate,1,8),"01"))) |>
-  filter(ask>200*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
+  filter(ask>400*sqrt(beds+1),ask<5000*sqrt(beds+1)) |>
   filter(!is.na(beds),!is.na(size)) |>
   mutate(Beds=case_when(beds==0 ~ "Studio",
                         beds==1 ~ "1 bedroom",
@@ -85,15 +85,19 @@ vancouver_data |>
   mutate(Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms"))) |>
   ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
   geom_boxplot(outliers=FALSE) +
-  facet_wrap(~Beds,scales="free_y") +
-  scale_y_continuous(labels=scales::dollar) 
+  facet_wrap(~Beds,nrow=1) +
+  scale_y_continuous(labels=scales::dollar) +
+  labs(title="Asking rents in the City of Vancouver",
+       x=NULL,y="Asking rent/sf")
 ```
+
+
 
 
 
 ```{r}
 vancouver_data |>
-  filter(!furnished) |>
+  #filter(!furnished) |>
   st_drop_geometry() |>
   filter(is.na(repostOfCraigID)) |>
   mutate(Year=substr(scrapeDate,1,4)) |>
@@ -101,7 +105,7 @@ vancouver_data |>
   filter(!is.na(size),size>200,size<4000) |>
   ggplot(aes(x=size,y=ask/size)) +
   geom_point() +
-  facet_wrap(~Year,scales="free_y") +
+  facet_wrap(~Year) +
   scale_y_continuous(labels=scales::dollar) +
   scale_x_continuous(trans="log") +
   geom_smooth(method="lm",se=FALSE)
