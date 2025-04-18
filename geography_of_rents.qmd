@@ -14,7 +14,7 @@ library(mountainmathHelpers)
 ```
 
 ```{r}
-cov_geo <- get_census("2020",regions = list(CSD="5915022"),geo_format = 'sf')
+cov_geo <- get_census("2021",regions = list(CSD="5915022"),geo_format = 'sf')
 
 rental_connection <- connection_for_prefix("cl") %>% tbl("cl")
 ```
@@ -55,6 +55,7 @@ hex_rents <- vancouver_data |>
   st_transform(st_crs(hex_grid)) |>
   st_join(hex_grid) |>
   st_drop_geometry() |>
+  filter(beds==1) |>
   summarize(rent_sf=mean(ask/size),count=n(),.by=c(hex_id,Year)) |>
   filter(Year %in% seq(2020,2024)) |>
   complete(hex_id,Year,fill=list(rent_sf=NA,count=0))
@@ -62,7 +63,7 @@ hex_rents <- vancouver_data |>
 
 hex_grid |>
   left_join(hex_rents,by="hex_id") |>
-  filter(count>0) |>
+  filter(count>10) |>
   mutate(rent_sf=ifelse(count<5,NA,rent_sf)) |>
   ggplot(aes(fill=rent_sf)) +
   geom_sf() +

@@ -85,7 +85,7 @@ vancouver_data |>
   mutate(Beds=factor(Beds,levels=c("Studio","1 bedroom","2 bedrooms","3+ bedrooms"))) |>
   ggplot(aes(x=Date,y=ask/size,group=as.factor(Date))) +
   geom_boxplot(outliers=FALSE) +
-  facet_wrap(~Beds,nrow=1) +
+  facet_wrap(~Beds) +
   scale_y_continuous(labels=scales::dollar) +
   labs(title="Asking rents in the City of Vancouver",
        x=NULL,y="Asking rent/sf")
